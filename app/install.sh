@@ -10,7 +10,8 @@ APP=~/Applications/Morpheus.app
 LABEL=ng.forgegrowth.morpheus
 PLIST=~/Library/LaunchAgents/$LABEL.plist
 
-mkdir -p $APP/Contents/MacOS ~/Applications ~/Library/Logs
+mkdir -p $APP/Contents/MacOS $APP/Contents/Resources ~/Applications ~/Library/Logs
+cp $DIR/assets/Morpheus.icns $APP/Contents/Resources/Morpheus.icns
 clang -O2 -DPYTHON="\"$DIR/.venv/bin/python\"" -DDIR="\"$DIR\"" -o $APP/Contents/MacOS/Morpheus $HERE/launcher.c
 cat > $APP/Contents/Info.plist <<PL
 <?xml version="1.0" encoding="UTF-8"?>
@@ -19,6 +20,7 @@ cat > $APP/Contents/Info.plist <<PL
   <key>CFBundleIdentifier</key><string>$LABEL</string>
   <key>CFBundleName</key><string>Morpheus</string>
   <key>CFBundleExecutable</key><string>Morpheus</string>
+  <key>CFBundleIconFile</key><string>Morpheus</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>1.0</string>
   <key>LSUIElement</key><true/>
@@ -47,6 +49,10 @@ cat > $PLIST <<PL
 </dict></plist>
 PL
 launchctl bootout gui/$(id -u)/$LABEL 2>/dev/null || true
+for i in {1..20}; do   # bootout returns before the old copy is gone; bootstrap fails until it is
+  launchctl print gui/$(id -u)/$LABEL >/dev/null 2>&1 || break
+  sleep 0.5
+done
 launchctl bootstrap gui/$(id -u) $PLIST
 mkdir -p ~/.local/bin
 ln -sf $HERE/morpheus ~/.local/bin/morpheus

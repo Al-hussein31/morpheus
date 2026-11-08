@@ -1,4 +1,22 @@
-# Morpheus
+<p align="center">
+  <img src="assets/icon.png" width="160" alt="Morpheus icon">
+</p>
+
+<h1 align="center">Morpheus</h1>
+
+<p align="center">
+  <b>Hands-free voice control for your Mac.</b><br>
+  Local speech recognition · a decision model, not a chatbot · asks before it sends anything
+</p>
+
+<p align="center">
+  <img alt="macOS 13+" src="https://img.shields.io/badge/macOS-13%2B-black?logo=apple">
+  <img alt="Python 3.11+" src="https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white">
+  <img alt="Cloudflare Workers AI" src="https://img.shields.io/badge/Cloudflare-Workers%20AI-F38020?logo=cloudflare&logoColor=white">
+  <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-green"></a>
+</p>
+
+---
 
 A hands-free voice assistant that controls your Mac. Say **"Hey Morpheus, ..."** and it opens apps, searches the web, downloads and plays videos, takes screenshots, records the screen, clicks buttons, types, compresses files and sends things on WhatsApp.
 
@@ -30,6 +48,7 @@ Your voice never leaves your Mac: speech recognition, voice recognition and the 
 10. [Troubleshooting](#troubleshooting)
 11. [Windows and Linux](#windows-and-linux)
 12. [Project layout](#project-layout)
+13. [License](#license)
 
 ---
 
@@ -368,6 +387,7 @@ settings.py           loads config.json (or config.example.json)
 app/launcher.c        Morpheus.app's main program: starts voice.py as its child
 app/install.sh        builds Morpheus.app and the login item
 app/morpheus          the `morpheus` control command
+assets/               the app icon (icon.png, Morpheus.icns)
 scripts/get-models.sh downloads the local models
 *.example.*           templates for your personal config.json, vocab.txt, commands.json
 ```
@@ -380,3 +400,11 @@ scripts/get-models.sh downloads the local models
 [yt-dlp](https://github.com/yt-dlp/yt-dlp) ·
 [PyObjC](https://pyobjc.readthedocs.io/) ·
 [AeroSpace](https://github.com/nikitabobko/AeroSpace)
+
+---
+
+## License
+
+[MIT](LICENSE). Use it, change it, share it.
+
+The models it downloads have their own licenses: Parakeet and TitaNet (NVIDIA, CC-BY-4.0), Silero VAD (MIT), Kokoro (Apache 2.0).
