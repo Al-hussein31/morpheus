@@ -13,6 +13,7 @@ Usage:
   .venv/bin/python voice.py --wake     only test the wake word (prints what it hears)
 """
 import difflib
+import fcntl
 import os
 import re
 import signal
@@ -658,8 +659,24 @@ def menubar(status):
     app.run()
 
 
+def only_copy():
+    """Hold a lock for as long as this process lives; a second Morpheus (the app opened by
+    hand while the login one runs) would hear every command too and run it twice."""
+    folder = os.path.expanduser("~/Library/Application Support/Morpheus")
+    os.makedirs(folder, exist_ok=True)
+    only_copy.lock = open(os.path.join(folder, "morpheus.lock"), "w")
+    try:
+        fcntl.flock(only_copy.lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except OSError:
+        return False
+
+
 def main():
     sys.stdout.reconfigure(line_buffering=True)
+    if not only_copy():
+        print("Morpheus is already running.")
+        sys.exit(0)   # exit 0 so launchd's KeepAlive doesn't keep retrying
     mode = "wake" if "--wake" in sys.argv else "names" if "--names-test" in sys.argv else "run"
     status = {"state": "starting", "paused": False, "last": ""}
     signal.signal(signal.SIGUSR1, lambda *_: toggle_pause(status))   # `morpheus pause`
