@@ -241,9 +241,10 @@ def split_wake(text):
 class Mouth:
     """Kokoro, loaded only the first time something has to be spoken. Speaks in the
     background so listening carries on; the voice check ignores Morpheus's own voice."""
-    def __init__(self):
+    def __init__(self, status=None):
         self.tts = None
         self.lock = threading.Lock()
+        self.status = status if status is not None else {}
 
     def say(self, text):
         threading.Thread(target=self._say, args=(text,), daemon=True).start()
@@ -259,7 +260,13 @@ class Mouth:
             samples, rate = self.tts.create(text[:600], voice=voice, speed=1.1, lang="en-gb" if voice[0] == "b" else "en-us")
             path = "/tmp/morpheus-say.wav"
             sf.write(path, samples, rate)
-            subprocess.run(["afplay", path])
+            # The listener closes the mic while this plays, so Morpheus never hears
+            # itself and an answer right after the question starts a clean sentence.
+            self.status["speaking"] = True
+            try:
+                subprocess.run(["afplay", path])
+            finally:
+                self.status["speaking"] = False
 
 
 PAD = int(SR * 0.3)            # the VAD clips the first syllable; add audio back around each sentence
@@ -276,7 +283,7 @@ def sentences(mic, vad, skip, status):
     """
     buf, offset = np.zeros(0, dtype=np.float32), 0   # offset = absolute index of buf[0]
     pending, loudest, started = [], 0.0, time.time()
-    while not status["paused"]:
+    while not status["paused"] and not status.get("speaking"):
         if skip.pop("now", False):
             backlog = mic.read_available
             if backlog:
@@ -308,8 +315,9 @@ def sentences(mic, vad, skip, status):
             yield buf[lo:hi]
 
 
-YES = re.compile(r"^\W*(yes|yeah|yep|yup|sure|send( it)?|do it|go ahead|confirm(ed)?|okay|ok)\b", re.I)
-CONFIRM_WAIT_S = 12
+YES = re.compile(r"^\W*(yes|yeah|yep|yup|yah|ya|sure|send( it)?|do it|go ahead|open it|confirm(ed)?|okay|ok|correct|right)\b", re.I)
+CONFIRM_WAIT_S = 20            # counted from the question, which takes a few seconds to say
+YES_VOICE = 0.3                # a short "yes" scores lower than a sentence; other voices stay under 0.25
 
 
 def act(agent, mouth, command, status, quiet_unclear=False):
@@ -331,6 +339,8 @@ def act(agent, mouth, command, status, quiet_unclear=False):
         return None, None
     done = " ".join(out["report"])
     status["last"] = f"{command[:40]}: {done[:60] or 'asked'}"
+    if agent.last.get("results") is not status.get("results"):
+        status["results"] = agent.last["results"]   # shown under "Last web search" in the menu bar
     if out["confirm"]:
         print(f"  => waiting for yes: {out['confirm']['text']!r}")
         sound("Submarine")
@@ -343,11 +353,13 @@ def act(agent, mouth, command, status, quiet_unclear=False):
     if out["ask"]:
         return unclear(agent, mouth, out["ask"], status)
     memory.worked(command)
+    if out.get("say"):
+        mouth.say(out["say"])
     summary = done or "Done."
     print("  =>", summary)
     sound("Glass")
     notify(summary)
-    if SPEAK_WHEN.match(command):
+    if SPEAK_WHEN.match(command) and not out.get("say"):
         mouth.say(summary)
     return None, None
 
@@ -440,13 +452,13 @@ def listen(status, mode):
     if mode == "run":
         keychain_token()
         import agent
-    asr, mouth, vocab = parakeet(), Mouth(), load_vocab()
+    asr, mouth, vocab = parakeet(), Mouth(status), load_vocab()
     voice = Voice() if mode == "run" else None
     waiting_until, confirm, session_until = 0.0, None, 0.0
     print('Listening. Say "Hey Morpheus, ..." (Ctrl+C to stop)')
     while True:
-        if status["paused"]:
-            time.sleep(0.3)
+        if status["paused"] or status.get("speaking"):
+            time.sleep(0.1)
             continue
         vad, skip = voice_detector(), {}
         with sd.InputStream(samplerate=SR, channels=1, dtype="float32", blocksize=BLOCK) as mic:
@@ -479,7 +491,7 @@ def listen(status, mode):
                 if in_session or confirm or (not woke and time.time() < waiting_until):
                     # No name was said: act only on the user's own voice.
                     similar, emb = voice.score(audio)
-                    if similar < SAME_VOICE and not woke:
+                    if similar < (YES_VOICE if confirm else SAME_VOICE) and not woke:
                         print(f"[{stamp}] other voice ({similar:.2f}), ignored: {text!r}")
                         continue
                 if in_session and len(text.split()) <= END_MAX_WORDS and SESSION_END.search(text):
@@ -491,18 +503,19 @@ def listen(status, mode):
                     continue
                 if confirm:
                     # The sentence after "Send X to Y? Say yes" answers it, with or without the name.
+                    # Only its last sentence counts: "Open it? ... Yes, open it." is a yes.
                     action, confirm = confirm, None
-                    if time.time() < action["until"] and YES.match(command if woke and command else text):
-                        line = action["yes"]()
-                        sound("Glass")
-                    else:
-                        line = action["no"]()
-                        sound("Basso")
+                    answer = re.split(r"(?<=[.!?])\s+", (command if woke and command else text).strip())[-1]
+                    said_yes = time.time() < action["until"] and YES.match(answer)
+                    line = action["yes"]() if said_yes else action["no"]()
+                    sound("Glass" if said_yes else "Basso")
                     print(f"[{stamp}] heard {text!r} => {line}")
                     notify(line)
                     status["last"] = line[:80]
-                    skip["now"] = True
-                    continue
+                    if said_yes or not (woke and len(command.split()) >= 2):
+                        skip["now"] = True
+                        continue
+                    # Not a yes but a new "Hey Morpheus, ..." command: cancel, then do the new one.
                 if not woke and (time.time() < waiting_until or in_session):
                     woke, command = True, text   # the sentence after a bare "Morpheus", or in a conversation
                 if not woke:
@@ -542,8 +555,8 @@ def listen(status, mode):
                     status["state"] = "listening"
                 skip["now"] = True  # drop anything the mic caught while the agent worked
                 print('Listening again.')
-        if confirm:  # paused while a send waited for its yes: cancel it
-            confirm["no"]()
+        if confirm and status["paused"]:  # paused while a send waited for its yes: cancel it
+            confirm["no"]()                # (the mic also closes while Morpheus speaks: that keeps it)
             confirm = None
 
 

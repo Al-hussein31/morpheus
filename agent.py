@@ -28,6 +28,7 @@ import time
 import urllib.parse
 
 import actions
+import memory
 
 ACCOUNT = os.environ["CF_ACCOUNT_ID"]
 TOKEN = os.environ["CF_API_TOKEN"]
@@ -99,6 +100,7 @@ TOOLS = {
     "open_folder": "Open a folder on this Mac in Finder, wherever it is",
     "open_file": "Find a file or document anywhere on this Mac by its name and open it",
     "open_search_result": "Open one of the web results found earlier (the first one, the second one...)",
+    "answer_question": "Answer a question or tell the user about something, out loud, from a web search (no browser)",
     "system_control": "Change a Mac setting: brightness, keyboard light, music play/pause, dark mode, Wi-Fi, lock, sleep, restart, shut down, empty trash",
     "terminal_command": "Run a program or command the user names (tmux, htop, git status...) in the terminal app",
     "finish": "The task is fully done; stop",
@@ -129,9 +131,9 @@ INTENTS = [
     (re.compile(r".*\b(bright(ness|er|en)?|dim|dimmer|darker|dark mode|light mode|wi-?fi|restart|reboot|shut ?down|sleep|lock( the| my)? screen|"
                 r"lock (it|my mac|the mac)|log ?out|trash|next (song|track)|previous (song|track)|(pause|resume|play) (the )?(music|song)|"
                 r"keyboard (light|backlight))\b", re.I), {"system_control"}),   # restart and the like ask for a yes themselves
-    (re.compile(r".*\b(folder|directory)\b", re.I), {"open_folder", "ask_user"}),
+    (re.compile(r".*\b(folder|directory)\b", re.I), {"open_folder"}),   # asks itself when unsure which
     (re.compile(r"^\W*(open|find|show)\b.*\b(file|document|doc|pdf|report|spreadsheet|sheet|presentation|deck|slides|image|photo|picture|"
-                r"note|notes|zip)\b", re.I), {"open_file", "ask_user"}),
+                r"note|notes|zip)\b", re.I), {"open_file"}),
     (re.compile(r".*\b(terminal|ghostty|tmux)\b", re.I), {"terminal_command", "open_app", "new_tab", "run_saved_command", "ask_user"}),
     (re.compile(r"^\W*run\b", re.I), {"run_saved_command", "terminal_command", "ask_user"}),
     (re.compile(r"^\W*(search|google|look up)\b", re.I), {"web_search", "ask_user"}),
@@ -142,7 +144,18 @@ INTENTS = [
 ]
 
 
+# "tell me about X", "who was X", "how did X ...": the user wants an answer read out, not a browser tab.
+# Questions about this Mac ("what apps are open", "what's my battery") are commands, not this.
+QUESTION = re.compile(r"^\W*(tell me (about|more|who|what|how|why|when|where)|explain|define|who (is|was|are|were)|"
+                      r"what (is|was|are|were|does|did)|what's|how (did|does|do|can|to|much|many|old|long|far)|"
+                      r"why (is|are|was|were|did|do|does)|when (did|was|is|will|were)|where (is|was|are) (the )?(?!my\b))", re.I)
+ABOUT_THE_MAC = re.compile(r"\b(apps?|battery|volume|brightness|file|folder|screen|wi-?fi|disk|downloads?|desktop|"
+                           r"workspace|tab|window|my ip)\b", re.I)
+
+
 def allowed_tools(task):
+    if QUESTION.match(task) and not ABOUT_THE_MAC.search(task):
+        return {"answer_question"}
     for pattern, tools in INTENTS:
         if pattern.match(task):
             return tools
@@ -348,7 +361,10 @@ WANTS_FILE = re.compile(r"\b(file|document|doc|pdf|video|photo|picture|image|scr
 last = {"file": None, "results": []}
 
 NAME_NOISE = re.compile(r"\b(open|show|find|go to|look for|the|a|an|folder|directory|file|document|for me|please|on|in|at|my|"
-                        r"desktop|downloads|documents|mac|laptop|computer|called|named|from|of)\b", re.I)
+                        r"desktop|downloads|documents|mac|laptop|computer|called|named|from|of|for|help me( to)?|me|where|is|are|"
+                        r"stored|kept|saved|located|which|that|has|have|contains?|containing|with|i|it|them|"
+                        r"workspace \w+)\b", re.I)
+HOLDS = re.compile(r"\bfolder\b.*\b(where|that has|that holds|which has|with|containing|that contains)\b", re.I)
 
 
 def name_words(goal):
@@ -362,6 +378,8 @@ def find_by_name(goal, words, places, folder):
     found = actions.spotlight(words, folders_only=folder)
     if folder:
         found = actions.folders() + found
+    else:
+        found = [f for f in found if not os.path.isdir(f[1])]   # "the file" is never a folder
     if places:
         found = [f for f in found if f"/{places[0]}/" in f[1] + "/"] or found
     found = list({p: (n, p) for n, p in found}.values())
@@ -376,6 +394,44 @@ def find_by_name(goal, words, places, folder):
 
 
 UNSURE = 0.45
+
+
+def spoken_answer(results, max_words=45):   # about 15 seconds: the mic is closed while it speaks
+    """The first sentences of the top results, without repeats: a short spoken answer."""
+    said, words = [], 0
+    for r in results[:4]:
+        for sentence in re.split(r"(?<=[.!?])\s+", r["text"].strip()):
+            sentence = sentence.strip()
+            if len(sentence) < 25 or sentence.endswith("...") or any(
+                    difflib.SequenceMatcher(None, sentence.lower(), s.lower()).ratio() > 0.6 for s in said):
+                continue
+            said.append(sentence)
+            words += len(sentence.split())
+            break
+        if words >= max_words:
+            break
+    return " ".join(said) or results[0]["title"]
+
+
+WORD_NUMBERS = {"one": "1", "two": "2", "three": "3", "four": "4", "five": "5", "six": "6", "seven": "7", "eight": "8", "nine": "9"}
+
+
+def to_workspace(goal, before):
+    """ "... in workspace 6": once the new window has focus, move it there and follow it."""
+    m = re.search(r"\bworkspace\s+(\w+)", goal, re.I)
+    if not m:
+        return None
+    space = WORD_NUMBERS.get(m.group(1).lower(), m.group(1))
+    if space not in workspaces():
+        return None
+    for _ in range(20):
+        now = sh("aerospace", "list-windows", "--focused", "--format", "%{window-id}")
+        if now and now != before:
+            break
+        time.sleep(0.15)
+    sh("aerospace", "move-node-to-workspace", space)
+    sh("aerospace", "workspace", space)
+    return space
 
 
 def age(path):
@@ -484,7 +540,8 @@ def run(goal, ctx=None):
     # the Naval podcast" opens the file instead of searching the web.
     # Not for an explicit web search: a local file match there only distracts Clef.
     words = [w for w in re.findall(r"[a-z0-9']+", goal.lower()) if w not in GENERIC_WORDS and w not in APP_WORDS]
-    if not found_files and words and re.match(r"^\W*(play|watch|listen|open|put)\b", goal, re.I):
+    if (not found_files and words and re.match(r"^\W*(play|watch|listen|open|put)\b", goal, re.I)
+            and not re.search(r"\b(folder|directory|file|document|pdf|website|site)\b", goal, re.I)):
         found_files = find_media(" ".join(words))
         if found_files:
             history.append("media on this Mac matching the task: " + ", ".join(os.path.basename(f) for f in found_files))
@@ -718,6 +775,20 @@ def run(goal, ctx=None):
             folder = tool == "open_folder"
             words = name_words(goal)
             places = [p for p in ("Desktop", "Downloads", "Documents") if p.lower() in goal.lower()]
+            before = sh("aerospace", "list-windows", "--focused", "--format", "%{window-id}") if "workspace" in goal.lower() else ""
+            # "the folder where my CAC certificate is": find the file, show it in its folder.
+            if folder and HOLDS.search(goal):
+                recent = last.get("file") or prev_file
+                path = recent if recent and any(w in os.path.basename(recent).lower() for w in words) else \
+                    find_by_name(goal, words, places, folder=False)
+                if not path:
+                    report.append(f"Couldn't find {' '.join(words)!r}")
+                    break
+                sh("open", "-R", path)
+                out["folder"] = os.path.dirname(path)
+                space = to_workspace(goal, before)
+                report.append(f"Showing {os.path.basename(path)} in its folder" + (f" on workspace {space}" if space else ""))
+                break
             if folder and not words and places:
                 path = os.path.expanduser(f"~/{places[0]}")
             else:
@@ -737,7 +808,18 @@ def run(goal, ctx=None):
                     return out
             sh("open", path)
             out["folder" if folder else "file"] = path
-            report.append(f"Opened {os.path.basename(path)}" + (" folder" if folder else ""))
+            space = to_workspace(goal, before)
+            report.append(f"Opened {os.path.basename(path)}" + (" folder" if folder else "") + (f" on workspace {space}" if space else ""))
+        elif tool == "answer_question":
+            question = re.sub(r"^\W*(can you |please )?(tell me( more)? about|tell me|explain( to me)?)\s+", "", goal, flags=re.I)
+            results = actions.web_results(question)
+            if not results:
+                report.append(f"Found nothing about {question!r}")
+                break
+            last["results"] = results
+            memory.log_search(question, results)
+            out["say"] = spoken_answer(results)
+            report.append(f"{results[0]['title'][:60]} (say \"open the first one\" for the page)")
         elif tool == "open_search_result":
             results = last.get("results") or []
             n = result_number(goal)
@@ -894,16 +976,18 @@ def do(command):
     tasks = split_tasks(command)
     if len(tasks) > 1:
         print(f"split into {len(tasks)} tasks: {tasks}")
-    report, ask, confirm, ctx = [], None, None, {}
+    report, ask, confirm, ctx, say = [], None, None, {}, []
     for task in tasks:
         r = run(task, ctx)
         ctx = {"app": r["app"], "file": r["file"], "site": r["site"], "folder": r.get("folder")}
         report += r["report"]
+        if r.get("say"):
+            say.append(r["say"])
         if r["ask"] or r["confirm"]:
             ask, confirm = r["ask"], r["confirm"]
             break
         time.sleep(0.8)  # let the app just opened settle before the next task
-    return {"report": report, "ask": ask, "confirm": confirm, "tasks": tasks}
+    return {"report": report, "ask": ask, "confirm": confirm, "tasks": tasks, "say": " ".join(say)}
 
 
 def vision_check():

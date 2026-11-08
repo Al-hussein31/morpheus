@@ -256,11 +256,11 @@ In conversation mode, sentences it can't use are ignored silently (you are proba
 
 Morpheus stays quiet and uses sounds and notifications, except when:
 
-- you ask it to **read** or **tell** you something ("read ...", "tell me ...", "what is ...")
+- you ask it to **read** or **tell** you something ("tell me about ...", "who is ...", "what is ...")
 - it needs a **yes** from you
 - it didn't understand (see above)
 
-The voice is set by `speaking_voice` in `config.json`.
+The voice is set by `speaking_voice` in `config.json`. While it speaks, the microphone is off, so it never hears itself; answer its question right after it finishes.
 
 ---
 
@@ -295,6 +295,9 @@ The voice is set by `speaking_voice` in `config.json`.
 | "pause the music" / "next track" | Media keys, for whatever app is playing |
 | "turn on dark mode" / "turn off Wi-Fi" / "lock my screen" / "sleep" | Mac settings |
 | "restart my Mac" / "shut down" / "log out" / "empty the trash" | **Waits for your "yes"** |
+| "tell me about John D. Rockefeller" / "who is Naval Ravikant" / "how did X ..." | Searches in the background and **reads you a short answer**; no browser opens |
+| "open the folder where my CAC certificate is" | Finds the file and shows it selected in its folder |
+| "... on workspace 6" (after any open) | Moves the new window to that AeroSpace workspace |
 | "open the first one" (after a web search) | Opens that result in your browser |
 | "stay with me" ... "that's all" | [Conversation mode](#conversation-mode) |
 
