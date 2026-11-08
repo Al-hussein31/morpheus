@@ -139,6 +139,14 @@ This fetches Parakeet (speech to text), Silero VAD (finds speech), TitaNet (reco
    open -e config.json
    ```
 
+### Optional: better web search
+
+Morpheus searches the web in the background when it doesn't understand a command. It works without a key (DuckDuckGo); with a free [Jina](https://jina.ai/) key the results are better. Save the key in the Keychain:
+
+```sh
+security add-generic-password -s morpheus -a jina_api_key -w
+```
+
 ### 4. Try it in the terminal first
 
 ```sh
@@ -233,12 +241,26 @@ It ends when you say **"that's all"**, **"thanks Morpheus"**, **"you can sleep"*
 
 Also, for **8 seconds after any command**, you can give the next one without saying "Morpheus".
 
+### When it doesn't understand
+
+Instead of giving up, Morpheus tries these in order and stops at the first that fits:
+
+1. **"Did you mean ...?"** It compares what it heard with commands that worked for you before (and common ones). *"open you tube"* becomes *"Did you mean, open YouTube?"* Say **yes** and it runs, and it remembers: next time that phrasing runs straight away.
+2. **A file or folder with that name.** *"Should I open the folder Forge Growth?"*
+3. **A web search, without opening a browser.** Questions and longer sentences are searched in the background ([Jina](https://jina.ai/) if you add a key, DuckDuckGo otherwise). It reads out the top answer, lists the results under **Last web search** in the menu bar, and keeps every search in `~/Library/Application Support/Morpheus/searches.md`. Say *"open the first one"* to open a result.
+4. **"I heard: ... Say it again?"** If it was too garbled for all of that, it tells you what it heard, so you know whether to speak up or add the word to `vocab.txt`.
+
+In conversation mode, sentences it can't use are ignored silently (you are probably talking to someone else).
+
 ### When it talks
 
 Morpheus stays quiet and uses sounds and notifications, except when:
 
 - you ask it to **read** or **tell** you something ("read ...", "tell me ...", "what is ...")
 - it needs a **yes** from you
+- it didn't understand (see above)
+
+The voice is set by `speaking_voice` in `config.json`.
 
 ---
 
@@ -254,7 +276,7 @@ Morpheus stays quiet and uses sounds and notifications, except when:
 | "go to example dot com" / "open the Stripe website" | Opens the site (by address, or the top search result for a name) |
 | "copy the text on this page" | Copies all text in the front window or web page |
 | "play the Naval podcast" | Finds the file on your Mac (Spotlight) and plays it |
-| "open the voices folder on my desktop" | Opens a folder in Finder |
+| "open the voices folder" / "open my SIWES report" | Finds the folder or file **anywhere** in your home folder (Spotlight) and opens it. If several look alike, it asks first. |
 | "play those on VLC" (after opening a folder) | Plays every audio and video file in it as a playlist |
 | "search for an X short about Y and download it" | Searches YouTube, picks the best match, downloads an MP4 to `~/Downloads/Morpheus` |
 | "download this video" | Downloads the video open in the browser |
@@ -268,7 +290,12 @@ Morpheus stays quiet and uses sounds and notifications, except when:
 | "send this document to me on WhatsApp" | Attaches the file, **waits for your "yes"** |
 | "open tmux in Ghostty" | Runs it in a new terminal tab (anything not on the safe list waits for "yes") |
 | "run disk space" | Runs one of your [saved commands](#saved-commands) |
-| "set the volume to low" / "mute" | Changes the volume |
+| "reduce my sound" / "set the volume to low" / "mute" | Changes the volume |
+| "make the screen brighter" / "dim the screen" / "brightness to half" | Screen brightness (also the keyboard light) |
+| "pause the music" / "next track" | Media keys, for whatever app is playing |
+| "turn on dark mode" / "turn off Wi-Fi" / "lock my screen" / "sleep" | Mac settings |
+| "restart my Mac" / "shut down" / "log out" / "empty the trash" | **Waits for your "yes"** |
+| "open the first one" (after a web search) | Opens that result in your browser |
 | "stay with me" ... "that's all" | [Conversation mode](#conversation-mode) |
 
 ---
@@ -285,13 +312,13 @@ All personal files are ignored by git; each has an `.example` version to copy.
   "whatsapp_self_chat": "your name as WhatsApp shows your own chat, e.g. @yourname",
   "my_names": ["me", "myself", "my own chat", "yourname"],
   "terminal": "Ghostty",
-  "speaking_voice": "af_bella"
+  "speaking_voice": "bm_fable"
 }
 ```
 
 - `whatsapp_self_chat` and `my_names`: "send it to **me**" goes to your own WhatsApp chat.
 - `terminal`: the app used for "open tmux in ...".
-- `speaking_voice`: any [Kokoro voice](https://huggingface.co/hexgrad/Kokoro-82M/blob/main/VOICES.md), e.g. `am_michael`, `bm_george`, `af_heart`.
+- `speaking_voice`: any [Kokoro voice](https://huggingface.co/hexgrad/Kokoro-82M/blob/main/VOICES.md). Names starting with `b` speak British English, `a` American: `bm_fable`, `bm_george`, `am_michael`, `af_heart`...
 
 ### `vocab.txt`: words it mishears
 
@@ -348,6 +375,10 @@ If it crashes, macOS restarts it within 10 seconds. "Quit Morpheus" in the menu 
 
 **Sent to Cloudflare** for each step of a command: the text of the command, the names of open apps and the front app, names of matching media files, and the options to choose from. No audio, no screenshots.
 
+**Sent to Jina or DuckDuckGo:** only the text of a sentence Morpheus didn't understand, when it falls back to a web search.
+
+**Remembered on your Mac** in `~/Library/Application Support/Morpheus`: commands that worked (`history.json`, for "Did you mean") and your web searches (`searches.md`). Delete the folder to forget them.
+
 **Cost:** Clef is billed per input token (about $0.24 per million; output is free). A typical command is a few thousand tokens, so a thousand commands cost well under a dollar. Check current prices on [Workers AI pricing](https://developers.cloudflare.com/workers-ai/platform/pricing/).
 
 **Safety:** sending a WhatsApp message or file, and running anything outside the terminal safe list, always waits for your spoken "yes". Anything else cancels.
@@ -384,6 +415,7 @@ agent.py              the brain: splits commands into tasks, asks Clef, runs the
 actions.py            the hands: keys, typing, clicking, screen, files, downloads, web, WhatsApp
 ax.py                 reads and presses on-screen elements through the macOS accessibility API
 settings.py           loads config.json (or config.example.json)
+memory.py             what it remembers: commands that worked, confirmed phrasings, web searches
 app/launcher.c        Morpheus.app's main program: starts voice.py as its child
 app/install.sh        builds Morpheus.app and the login item
 app/morpheus          the `morpheus` control command

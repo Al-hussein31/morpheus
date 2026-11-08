@@ -96,7 +96,10 @@ TOOLS = {
     "click": "Click a button, link, chat or other item on screen by its name",
     "send_whatsapp": "Send a file or a message to a contact on WhatsApp",
     "run_saved_command": "Run one of the user's saved terminal commands",
-    "open_folder": "Open a folder on this Mac in Finder (Desktop, Downloads, Documents or one inside them)",
+    "open_folder": "Open a folder on this Mac in Finder, wherever it is",
+    "open_file": "Find a file or document anywhere on this Mac by its name and open it",
+    "open_search_result": "Open one of the web results found earlier (the first one, the second one...)",
+    "system_control": "Change a Mac setting: brightness, keyboard light, music play/pause, dark mode, Wi-Fi, lock, sleep, restart, shut down, empty trash",
     "terminal_command": "Run a program or command the user names (tmux, htop, git status...) in the terminal app",
     "finish": "The task is fully done; stop",
     "ask_user": "The task is unclear or unsafe; ask the user",
@@ -121,14 +124,21 @@ INTENTS = [
     (re.compile(r"^\W*(paste|undo|redo|save|refresh|reload|select all|scroll|go back|go forward|minimize)\b", re.I),
      {"press_shortcut", "ask_user"}),
     (re.compile(r"^\W*(type|write)\b", re.I), {"type_text", "ask_user"}),
+    (re.compile(r"^\W*open (the )?(first|second|third|fourth|fifth|top|last|1st|2nd|3rd|number \w+|\d)\b( one| result| link)?\W*$", re.I),
+     {"open_search_result", "ask_user"}),
+    (re.compile(r".*\b(bright(ness|er|en)?|dim|dimmer|darker|dark mode|light mode|wi-?fi|restart|reboot|shut ?down|sleep|lock( the| my)? screen|"
+                r"lock (it|my mac|the mac)|log ?out|trash|next (song|track)|previous (song|track)|(pause|resume|play) (the )?(music|song)|"
+                r"keyboard (light|backlight))\b", re.I), {"system_control"}),   # restart and the like ask for a yes themselves
     (re.compile(r".*\b(folder|directory)\b", re.I), {"open_folder", "ask_user"}),
+    (re.compile(r"^\W*(open|find|show)\b.*\b(file|document|doc|pdf|report|spreadsheet|sheet|presentation|deck|slides|image|photo|picture|"
+                r"note|notes|zip)\b", re.I), {"open_file", "ask_user"}),
     (re.compile(r".*\b(terminal|ghostty|tmux)\b", re.I), {"terminal_command", "open_app", "new_tab", "run_saved_command", "ask_user"}),
     (re.compile(r"^\W*run\b", re.I), {"run_saved_command", "terminal_command", "ask_user"}),
     (re.compile(r"^\W*(search|google|look up)\b", re.I), {"web_search", "ask_user"}),
     (re.compile(r"^\W*(quit|close|exit|kill)\b", re.I), {"quit_app", "ask_user"}),
     (re.compile(r"^\W*(play|watch|listen)\b", re.I), {"find_media_file", "open_file_in_app", "open_app", "web_search", "ask_user"}),
     (re.compile(r"^\W*(go to|switch to)\b.*workspace", re.I), {"go_to_workspace", "ask_user"}),
-    (re.compile(r"^\W*(mute|unmute|turn (it |the volume )?(up|down)|volume)\b", re.I), {"set_volume", "ask_user"}),
+    (re.compile(r".*\b(sound|volume|louder|quieter|softer|mute|unmute)\b", re.I), {"set_volume", "system_control", "ask_user"}),
 ]
 
 
@@ -322,6 +332,7 @@ def choose(goal, instructions, options, state=None):
         options = {**options, "none": "none of these"}
     ans = clef(state or {"task": goal}, {"x": {"type": "choice", "instructions": instructions, "criteria": options}})["answers"]["x"]
     print(f"    {instructions[:50]}... -> {options.get(ans['choice'], ans['choice'])!r} ({ans['probabilities'][ans['choice']]:.0%}) [{timings[-1]:.0f} ms]")
+    choose.sure = ans["probabilities"][ans["choice"]]   # how sure Clef was, for callers that ask when unsure
     return ans["choice"]
 
 
@@ -334,7 +345,58 @@ WANTS_FILE = re.compile(r"\b(file|document|doc|pdf|video|photo|picture|image|scr
                         r"|^\W*send (it|this|that|them)\b", re.I)
 
 # The file Morpheus made or found last ("take a screenshot", then "send it to ME on WhatsApp").
-last = {"file": None}
+last = {"file": None, "results": []}
+
+NAME_NOISE = re.compile(r"\b(open|show|find|go to|look for|the|a|an|folder|directory|file|document|for me|please|on|in|at|my|"
+                        r"desktop|downloads|documents|mac|laptop|computer|called|named|from|of)\b", re.I)
+
+
+def name_words(goal):
+    """The words that name the thing: "open the voices folder on my desktop" -> ["voices"]."""
+    return re.findall(r"[a-z0-9']+", NAME_NOISE.sub(" ", goal.lower()))
+
+
+def find_by_name(goal, words, places, folder):
+    """A file or folder named by the words, anywhere in your home folder. The quick scan of
+    usual places and Spotlight's index together; Clef picks among the best matches."""
+    found = actions.spotlight(words, folders_only=folder)
+    if folder:
+        found = actions.folders() + found
+    if places:
+        found = [f for f in found if f"/{places[0]}/" in f[1] + "/"] or found
+    found = list({p: (n, p) for n, p in found}.values())
+    ranked = actions.rank(found, words, n=8)
+    if not ranked:
+        return None
+    # With no place named, the one you worked with lately is the likely one: say how recent each is.
+    choice = choose(goal, f"Which {'folder' if folder else 'file'} does the task mean? When the task names no place, prefer one changed recently over an old one with the same words.",
+                    {**{f"d{k}": f"{p.replace(os.path.expanduser('~'), '~')} (changed {age(p)})" for k, (_, p) in enumerate(ranked)},
+                     "none": "none of these"})
+    return ranked[int(choice[1:])][1] if choice.startswith("d") else None
+
+
+UNSURE = 0.45
+
+
+def age(path):
+    try:
+        days = (time.time() - os.path.getmtime(path)) / 86400
+    except OSError:
+        return "unknown"
+    return "today" if days < 1 else f"{int(days)} days ago" if days < 60 else f"{int(days / 30)} months ago"
+
+
+ORDINALS = {"first": 0, "1st": 0, "top": 0, "one": 0, "1": 0, "second": 1, "2nd": 1, "two": 1, "2": 1,
+            "third": 2, "3rd": 2, "three": 2, "3": 2, "fourth": 3, "four": 3, "4": 3, "fifth": 4, "five": 4, "5": 4}
+
+
+def result_number(goal):
+    for w in re.findall(r"[a-z0-9]+", goal.lower()):
+        if w in ORDINALS:
+            return ORDINALS[w]
+        if w == "last":
+            return len(last.get("results") or [1]) - 1
+    return 0
 
 
 STRONG_VERBS = {"open", "search", "play", "close", "quit", "download", "send", "launch"}
@@ -455,6 +517,9 @@ def run(goal, ctx=None):
         if allowed & {"press_shortcut", "copy_page_text"}:
             questions["shortcut"] = {"type": "choice", "instructions": "If the action presses a keyboard shortcut, which one does the task mean?",
                                      "criteria": {k: k for k in actions.SHORTCUTS}}
+        if allowed & {"system_control"}:
+            questions["setting"] = {"type": "choice", "instructions": "Which Mac setting does the task want changed?",
+                                    "criteria": {k: k for k in actions.SYSTEM}}
         if allowed & {"take_screenshot"}:
             questions["area"] = {"type": "choice", "instructions": "Should the screenshot show the whole screen or only the front window?",
                                  "criteria": {"screen": "the whole screen (the default)", "window": "only the front window or app"}}
@@ -649,26 +714,46 @@ def run(goal, ctx=None):
             report.append(f"Clicked {label[:50]!r}" if actions.click(how) else f"Couldn't click {label[:50]!r}")
         elif tool == "send_whatsapp":
             return send_whatsapp(goal, front, prev_file, out)
-        elif tool == "open_folder":
-            folders = actions.folders()
-            words = re.findall(r"[a-z0-9']+", re.sub(r"\b(open|show|go to|the|folder|directory|for me|on|in|my|desktop|downloads|documents)\b", " ",
-                                                    goal.lower()))
+        elif tool in ("open_folder", "open_file"):
+            folder = tool == "open_folder"
+            words = name_words(goal)
             places = [p for p in ("Desktop", "Downloads", "Documents") if p.lower() in goal.lower()]
-            if not words and places:
+            if folder and not words and places:
                 path = os.path.expanduser(f"~/{places[0]}")
             else:
-                ranked = actions.rank([(name, path) for name, path in folders
-                                       if not places or f"/{places[0]}/" in path + "/"] or folders, words, n=10)
-                choice = choose(goal, "Which folder does the task mean?",
-                                {**{f"d{k}": path.replace(os.path.expanduser("~"), "~") for k, (_, path) in enumerate(ranked)},
-                                 "none": "none of these"})
-                if not choice.startswith("d"):
-                    report.append("Couldn't find that folder")
+                path = find_by_name(goal, words, places, folder)
+                if not path:
+                    report.append(f"Couldn't find a {'folder' if folder else 'file'} called {' '.join(words)!r}")
                     break
-                path = ranked[int(choice[1:])][1]
+                if choose.sure < UNSURE:   # several similar names: check before opening the wrong one
+                    where = os.path.basename(os.path.dirname(path))
+
+                    def open_it(path=path):
+                        sh("open", path)
+                        return f"Opened {os.path.basename(path)}"
+                    out["confirm"] = {"text": f"Open {os.path.basename(path)} in {where}?", "yes": open_it,
+                                      "no": lambda: "Okay. Say where it is, like: open the voices folder on my desktop."}
+                    out["folder" if folder else "file"] = path
+                    return out
             sh("open", path)
-            out["folder"] = path
-            report.append(f"Opened the {os.path.basename(path)} folder")
+            out["folder" if folder else "file"] = path
+            report.append(f"Opened {os.path.basename(path)}" + (" folder" if folder else ""))
+        elif tool == "open_search_result":
+            results = last.get("results") or []
+            n = result_number(goal)
+            if not results or n >= len(results):
+                report.append("No search results to open yet")
+                break
+            browser = prev_app if prev_app in BROWSERS else None
+            sh(*(["open", "-a", browser, results[n]["url"]] if browser else ["open", results[n]["url"]]))
+            report.append(f"Opened {results[n]['title'][:60]}")
+        elif tool == "system_control":
+            setting = res["setting"]["choice"]
+            if actions.SYSTEM[setting][1]:
+                out["confirm"] = {"text": f"{setting.capitalize()}?",
+                                  "yes": lambda: actions.system(setting), "no": lambda: "Cancelled"}
+                return out
+            report.append(actions.system(setting))
         elif tool == "terminal_command":
             return terminal_command(goal, out)
         elif tool == "run_saved_command":

@@ -557,3 +557,135 @@ def run_saved(name):
     out = (r.stdout.strip() or r.stderr.strip()).splitlines()
     tail = " | ".join(out[-3:])[:180]
     return f"{name}: {tail}" if r.returncode == 0 else f"{name} failed: {tail}"
+
+
+# ---- system controls -------------------------------------------------------
+
+# The keys on the top row of a Mac keyboard, sent the way the keyboard sends them.
+SPECIAL_KEYS = {"volume up": 0, "volume down": 1, "brightness up": 2, "brightness down": 3, "mute": 7,
+                "play pause": 16, "next track": 17, "previous track": 18,
+                "keyboard light up": 21, "keyboard light down": 22}
+
+
+def special_key(name, times=1):
+    from AppKit import NSEvent
+    for _ in range(times):
+        for down in (True, False):
+            flags = 0xa00 if down else 0xb00
+            ev = NSEvent.otherEventWithType_location_modifierFlags_timestamp_windowNumber_context_subtype_data1_data2_(
+                14, (0, 0), flags, 0, 0, None, 8, (SPECIAL_KEYS[name] << 16) | flags, -1)
+            Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev.CGEvent())
+            time.sleep(0.03)
+
+
+def _osa(script):
+    r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=30)
+    return r.returncode == 0, r.stderr.strip()
+
+
+# Spoken setting -> (what it does, needs a yes first). Clef picks the setting name.
+SYSTEM = {
+    "brightness up": ("Brightness up", False), "brightness down": ("Brightness down", False),
+    "brightness max": ("Brightness to full", False), "brightness low": ("Brightness low", False),
+    "brightness half": ("Brightness to half", False),
+    "keyboard light up": ("Keyboard light up", False), "keyboard light down": ("Keyboard light down", False),
+    "play or pause music": ("Play/pause", False), "next track": ("Next track", False), "previous track": ("Previous track", False),
+    "dark mode on": ("Dark mode on", False), "dark mode off": ("Dark mode off", False), "toggle dark mode": ("Dark mode switched", False),
+    "wifi on": ("Wi-Fi on", False), "wifi off": ("Wi-Fi off", True),
+    "lock screen": ("Locked the screen", False), "sleep": ("Going to sleep", False),
+    "turn the display off": ("Display off", False), "show desktop": ("Showing the desktop", False),
+    "empty trash": ("Emptied the Trash", True), "restart": ("Restarting", True),
+    "shut down": ("Shutting down", True), "log out": ("Logging out", True),
+}
+
+
+def system(setting):
+    """Do one SYSTEM setting; returns a report line."""
+    label = SYSTEM[setting][0]
+    if setting in ("brightness up", "brightness down", "keyboard light up", "keyboard light down", "next track", "previous track"):
+        special_key(setting, 2 if "brightness" in setting else 1)
+    elif setting in ("brightness max", "brightness low", "brightness half"):
+        special_key("brightness down", 16)          # 16 steps from full to off: start from the bottom
+        special_key("brightness up", {"brightness max": 16, "brightness low": 3, "brightness half": 8}[setting])
+    elif setting == "play or pause music":
+        special_key("play pause")
+    elif setting.startswith("dark mode") or setting == "toggle dark mode":
+        value = {"dark mode on": "true", "dark mode off": "false"}.get(setting, "not dark mode")
+        ok, err = _osa(f'tell application "System Events" to tell appearance preferences to set dark mode to {value}')
+        if not ok:
+            return f"Couldn't change dark mode: {err[:80]}"
+    elif setting.startswith("wifi"):
+        r = subprocess.run(["networksetup", "-setairportpower", "en0", setting.split()[1]], capture_output=True, text=True)
+        if r.returncode:
+            return f"Couldn't switch Wi-Fi: {r.stderr.strip()[:80]}"
+    elif setting == "lock screen":
+        keys("ctrl cmd q")
+    elif setting == "sleep":
+        subprocess.Popen(["pmset", "sleepnow"])
+    elif setting == "turn the display off":
+        subprocess.Popen(["pmset", "displaysleepnow"])
+    elif setting == "show desktop":
+        _osa('tell application "System Events" to key code 103')   # F11
+    elif setting == "empty trash":
+        ok, err = _osa('tell application "Finder" to empty trash')
+        if not ok:
+            return f"Couldn't empty the Trash: {err[:80]}"
+    elif setting in ("restart", "shut down", "log out"):
+        # Through System Events, so apps get the normal chance to save or object.
+        action = {"restart": "restart", "shut down": "shut down", "log out": "log out"}[setting]
+        ok, err = _osa(f'tell application "System Events" to {action}')
+        if not ok:
+            return f"Couldn't {setting}: {err[:80]}"
+    return label
+
+
+# ---- finding things anywhere on the Mac --------------------------------------
+
+def spotlight(words, folders_only=False, limit=40):
+    """Files or folders whose names contain any of the words, newest first, from
+    Spotlight's index: the whole Mac in a fraction of a second. [(name, path)]"""
+    words = [w for w in words if len(w) > 2][:5]
+    if not words:
+        return []
+    name = " || ".join(f'kMDItemFSName == "*{w}*"cd' for w in words)
+    query = f"({name})" + (' && kMDItemContentType == "public.folder"' if folders_only else "")
+    try:
+        out = subprocess.run(["mdfind", "-onlyin", os.path.expanduser("~"), query],
+                             capture_output=True, text=True, timeout=10).stdout.splitlines()
+    except subprocess.TimeoutExpired:
+        return []
+    keep = [p for p in out if "/Library/" not in p and "/." not in p and "/node_modules/" not in p
+            and ".app/" not in p and "/.venv/" not in p]
+    return [(os.path.basename(p), p) for p in keep[:limit * 5]]
+
+
+# ---- web search, without opening a browser -----------------------------------
+
+def jina_key():
+    r = subprocess.run(["security", "find-generic-password", "-s", "morpheus", "-a", "jina_api_key", "-w"],
+                       capture_output=True, text=True)
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
+def web_results(query, n=5):
+    """Top web results as [{"title", "url", "text"}]: Jina search with your key, DuckDuckGo without."""
+    key = jina_key()
+    if key:
+        req = urllib.request.Request("https://s.jina.ai/?q=" + urllib.parse.quote(query),
+                                     headers={"Authorization": f"Bearer {key}", "Accept": "application/json",
+                                              "X-Respond-With": "no-content"})
+        data = json.loads(urllib.request.urlopen(req, timeout=20).read())
+        return [{"title": d.get("title", ""), "url": d.get("url", ""), "text": d.get("description", "")}
+                for d in (data.get("data") or [])[:n]]
+    import html as html_lib
+    req = urllib.request.Request("https://html.duckduckgo.com/html/", data=urllib.parse.urlencode({"q": query}).encode(),
+                                 headers={"User-Agent": "Mozilla/5.0 (Macintosh) AppleWebKit/605.1.15 Safari/605.1.15"})
+    body = urllib.request.urlopen(req, timeout=20).read().decode("utf-8", "replace")
+    links = re.findall(r'class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', body)
+    texts = re.findall(r'class="result__snippet"[^>]*>(.*?)</a>', body, re.S)
+    clean = lambda s: html_lib.unescape(re.sub("<.*?>", "", s)).strip()
+    out = []
+    for (url, title), text in list(zip(links, texts))[:n]:
+        m = re.search(r"uddg=([^&]+)", url)
+        out.append({"title": clean(title), "url": urllib.parse.unquote(m.group(1)) if m else url, "text": clean(text)})
+    return out

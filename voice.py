@@ -25,6 +25,8 @@ import numpy as np
 import sherpa_onnx
 import sounddevice as sd
 
+import actions
+import memory
 from settings import CONFIG, personal
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -237,19 +239,27 @@ def split_wake(text):
 
 
 class Mouth:
-    """Kokoro, loaded only the first time something has to be spoken."""
+    """Kokoro, loaded only the first time something has to be spoken. Speaks in the
+    background so listening carries on; the voice check ignores Morpheus's own voice."""
     def __init__(self):
         self.tts = None
+        self.lock = threading.Lock()
 
     def say(self, text):
+        threading.Thread(target=self._say, args=(text,), daemon=True).start()
+
+    def _say(self, text):
         import soundfile as sf
         from kokoro_onnx import Kokoro
-        if self.tts is None:
-            self.tts = Kokoro(f"{M}/kokoro-v1.0.fp16.onnx", f"{M}/voices-v1.0.bin")
-        samples, rate = self.tts.create(text[:600], voice=CONFIG.get("speaking_voice", "af_bella"), speed=1.1, lang="en-us")
-        path = "/tmp/morpheus-say.wav"
-        sf.write(path, samples, rate)
-        subprocess.run(["afplay", path])
+        voice = CONFIG.get("speaking_voice", "af_bella")
+        with self.lock:   # one sentence at a time
+            if self.tts is None:
+                self.tts = Kokoro(f"{M}/kokoro-v1.0.fp16.onnx", f"{M}/voices-v1.0.bin")
+            # Kokoro voice names start with a for American, b for British English.
+            samples, rate = self.tts.create(text[:600], voice=voice, speed=1.1, lang="en-gb" if voice[0] == "b" else "en-us")
+            path = "/tmp/morpheus-say.wav"
+            sf.write(path, samples, rate)
+            subprocess.run(["afplay", path])
 
 
 PAD = int(SR * 0.3)            # the VAD clips the first syllable; add audio back around each sentence
@@ -305,6 +315,10 @@ CONFIRM_WAIT_S = 12
 def act(agent, mouth, command, status, quiet_unclear=False):
     """Run the command. Returns ("ask", None) when Clef wants the next sentence as a
     clarification, ("confirm", action) when an action waits for a yes, else (None, None)."""
+    known = memory.alias(command)
+    if known:   # a phrasing you confirmed before ("Did you mean ...?" "yes")
+        print(f"  {command!r} is what you confirmed as {known!r}")
+        command = known
     print(f"  command: {command!r}")
     status["state"] = "working"
     try:
@@ -321,15 +335,14 @@ def act(agent, mouth, command, status, quiet_unclear=False):
         print(f"  => waiting for yes: {out['confirm']['text']!r}")
         sound("Submarine")
         notify(f"{out['confirm']['text']} Say yes to go ahead, anything else cancels.")
+        mouth.say(out["confirm"]["text"] + " Say yes.")
         return "confirm", out["confirm"]
     if out["ask"] and quiet_unclear and not done:
         print(f"  => not a command, ignored: {out['ask']!r}")
         return None, None
     if out["ask"]:
-        print(f"  => unclear: {out['ask']!r}  (say it again another way)")
-        sound("Purr")
-        notify(f"{done + ' ' if done else ''}Didn't get: \"{out['ask']}\". Say it another way, no need to say Morpheus.")
-        return "ask", None
+        return unclear(agent, mouth, out["ask"], status)
+    memory.worked(command)
     summary = done or "Done."
     print("  =>", summary)
     sound("Glass")
@@ -337,6 +350,74 @@ def act(agent, mouth, command, status, quiet_unclear=False):
     if SPEAK_WHEN.match(command):
         mouth.say(summary)
     return None, None
+
+
+QUESTION = re.compile(r"^\W*(what|who|whom|whose|where|when|why|how|which|is|are|was|were|can|could|does|do|did|"
+                      r"define|meaning|explain|tell me)\b", re.I)
+STOPWORDS = {"the", "a", "an", "to", "of", "on", "in", "for", "me", "my", "i", "you", "it", "is", "and", "so", "like",
+             "this", "that", "with", "can", "please", "just", "um", "uh", "okay", "yeah"}
+
+
+def unclear(agent, mouth, command, status):
+    """Clef couldn't map what was said to an action. Try, in order: a command you use
+    that sounds like it; a file or folder with that name; a web search, read out loud;
+    and if it was too garbled for any of those, say what was heard."""
+    # 1. A command you have used before, or a common one, that sounds like it.
+    guess = memory.did_you_mean(command)
+    if guess:
+        print(f"  => unclear, did you mean {guess!r}?")
+
+        def yes():
+            out = agent.do(guess)
+            memory.learn(command, guess)
+            return " ".join(out["report"]) or "Done."
+        sound("Submarine")
+        notify(f"Did you mean: \"{guess}\"? Say yes.")
+        mouth.say(f"Did you mean, {guess}?")
+        return "confirm", {"text": guess, "yes": yes, "no": lambda: "Okay, never mind."}
+    # 2. A folder or file on this Mac with that name.
+    words = [w for w in agent.name_words(command) if w not in STOPWORDS]
+    if 1 <= len(words) <= 4:
+        hits = [(n, p) for n, p in actions.spotlight(words)
+                if all(w in n.lower() for w in words)]
+        if hits:
+            name, path = min(hits, key=lambda h: len(h[1]))   # the shallowest match is usually the one
+            kind = "folder" if os.path.isdir(path) else "file"
+            print(f"  => unclear, open the {kind} {path!r}?")
+            sound("Submarine")
+            notify(f"Open the {kind} \"{name}\"? Say yes.")
+            mouth.say(f"Should I open the {kind} {name}?")
+
+            def open_it():
+                subprocess.run(["open", path])
+                return f"Opened {name}"
+            return "confirm", {"text": name, "yes": open_it, "no": lambda: "Okay, never mind."}
+    # 3. Search the web without opening a browser and read out the top answer.
+    meaningful = [w for w in re.findall(r"[a-z0-9']+", command.lower()) if w not in STOPWORDS]
+    if QUESTION.match(command) or len(meaningful) >= 3:
+        try:
+            results = actions.web_results(command)
+        except Exception as e:
+            results = []
+            print("  web search failed:", e)
+        if results:
+            agent.last["results"] = results
+            status["results"] = results
+            memory.log_search(command, results)
+            top = results[0]
+            first = re.split(r"(?<=[.!?])\s", top["text"].strip())[0][:220]
+            print(f"  => searched the web: {top['title']!r}")
+            sound("Glass")
+            notify(f"{top['title']}: {first}  (say \"open the first one\")")
+            mouth.say(f"{first or top['title']}")
+            status["last"] = f"searched: {command[:50]}"
+            return None, None
+    # 4. Too garbled: say what was heard, so you know whether to speak up or rephrase.
+    print(f"  => unclear: {command!r}  (say it again another way)")
+    sound("Purr")
+    notify(f"I heard \"{command}\". Say it another way, no need to say Morpheus.")
+    mouth.say(f"I heard, {command}. Say it again?")
+    return "ask", None
 
 
 def toggle_pause(status):
@@ -431,6 +512,10 @@ def listen(status, mode):
                     similar, emb = voice.score(audio)
                     print(f"  voice match {similar:.2f}")
                     voice.learn(emb, similar)
+                if not in_session and len(command.split()) <= END_MAX_WORDS and SESSION_END.search(command):
+                    print("  => nothing to end")
+                    sound("Bottle")
+                    continue
                 if SESSION_START.search(command):
                     command = SESSION_START.sub("", command).strip(" ,.!?")
                     session_until = time.time() + SESSION_IDLE_S
@@ -495,6 +580,11 @@ def menubar(status):
             for title, sel in (("Open log", "openLog:"), ("Restart", "restart:"), ("Quit Morpheus", "quit:")):
                 menu.addItemWithTitle_action_keyEquivalent_(title, sel, "").setTarget_(self)
             self.pause.setTarget_(self)
+            self.results = NSMenu.alloc().init()
+            found = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("Last web search", None, "")
+            found.setSubmenu_(self.results)
+            menu.insertItem_atIndex_(found, 2)
+            self.shown_results = None
             self.item.setMenu_(menu)
             self.shown = None
             NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(0.3, self, "tick:", None, True)
@@ -511,6 +601,23 @@ def menubar(status):
                 self.info.setTitle_(f"Morpheus: {state}")
                 self.pause.setTitle_(f"{'Resume' if status['paused'] else 'Pause'}  ({HOTKEY})")
             self.last.setTitle_(f"Last: {status['last']}" if status["last"] else "Say \"Hey Morpheus, ...\"")
+            results = status.get("results")
+            if results is not self.shown_results:
+                self.shown_results = results
+                self.results.removeAllItems()
+                for r in results or []:
+                    it = self.results.addItemWithTitle_action_keyEquivalent_(r["title"][:70] or r["url"], "openResult:", "")
+                    it.setRepresentedObject_(r["url"])
+                    it.setTarget_(self)
+                more = self.results.addItemWithTitle_action_keyEquivalent_("All searches...", "openSearches:", "")
+                more.setTarget_(self)
+
+        def openResult_(self, sender):
+            subprocess.Popen(["open", sender.representedObject()])
+
+        def openSearches_(self, sender):
+            if os.path.exists(memory.SEARCHES):
+                subprocess.Popen(["open", "-e", memory.SEARCHES])
 
         def toggle_(self, sender):
             toggle_pause(status)
