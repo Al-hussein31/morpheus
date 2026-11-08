@@ -1,0 +1,7 @@
+{
+  "disk space": "df -h / | tail -1 | awk '{print $4 \" free of \" $2}'",
+  "battery": "pmset -g batt | grep -o '[0-9]*%.*'",
+  "my ip address": "curl -s --max-time 10 https://api.ipify.org",
+  "wifi name": "networksetup -getairportnetwork en0",
+  "uptime": "uptime | sed 's/.*up/up/; s/,.*//'"
+}

@@ -1,0 +1,10 @@
+# Downloaded models (see scripts/get-models.sh) and your voice profile
+models/
+.venv/
+__pycache__/
+# Personal files: copy the .example versions to make them
+config.json
+vocab.txt
+commands.json
+# Recordings
+*.wav

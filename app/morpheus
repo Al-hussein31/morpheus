@@ -1,0 +1,14 @@
+#!/bin/zsh
+# Control the Morpheus login agent.
+LABEL=ng.forgegrowth.morpheus
+SVC=gui/$(id -u)/$LABEL
+LOG=~/Library/Logs/Morpheus.log
+case $1 in
+  status)  launchctl print $SVC 2>/dev/null | grep -E "^\s*(state|pid|last exit code) =" || echo "not loaded" ;;
+  pause)   pkill -USR1 -f "voice.py --menubar" && echo "toggled pause" ;;
+  restart) launchctl kickstart -k $SVC && echo restarted ;;
+  stop)    launchctl bootout $SVC && echo "stopped until next login (or: morpheus start)" ;;
+  start)   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/$LABEL.plist 2>/dev/null; launchctl kickstart $SVC && echo started ;;
+  log)     tail -n ${2:-40} -f $LOG ;;
+  *)       echo "usage: morpheus status|pause|restart|stop|start|log" ;;
+esac

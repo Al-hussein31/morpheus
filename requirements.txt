@@ -1,0 +1,11 @@
+sherpa-onnx>=2.0
+sounddevice>=0.5
+soundfile>=0.13
+numpy>=2.0
+kokoro-onnx>=0.5
+pillow>=11
+yt-dlp>=2026.8.19
+pyobjc-framework-Cocoa>=12
+pyobjc-framework-ApplicationServices>=12
+pyobjc-framework-Quartz>=12
+pyobjc-framework-Vision>=12

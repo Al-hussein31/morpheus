@@ -1,0 +1,10 @@
+# Words speech-to-text gets wrong for you. One term per line, then (after a colon)
+# what it mishears it as. Close misspellings of longer words are fixed without listing.
+# Copy this file to vocab.txt and make it yours.
+Zen: zem, zenn
+WhatsApp: whats up
+VLC: v l c, vlcc
+YouTube: you tube
+tmux: tmox, t mux
+Ghostty: ghosty
+AeroSpace
