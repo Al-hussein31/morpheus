@@ -417,7 +417,7 @@ def unclear(agent, mouth, command, status):
             status["results"] = results
             memory.log_search(command, results)
             top = results[0]
-            first = re.split(r"(?<=[.!?])\s", top["text"].strip())[0][:220]
+            first = agent.written_answer(command, results) or re.split(r"(?<=[.!?])\s", top["text"].strip())[0][:220]
             print(f"  => searched the web: {top['title']!r}")
             sound("Glass")
             notify(f"{top['title']}: {first}  (say \"open the first one\")")

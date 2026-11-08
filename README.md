@@ -295,7 +295,7 @@ The voice is set by `speaking_voice` in `config.json`. While it speaks, the micr
 | "pause the music" / "next track" | Media keys, for whatever app is playing |
 | "turn on dark mode" / "turn off Wi-Fi" / "lock my screen" / "sleep" | Mac settings |
 | "restart my Mac" / "shut down" / "log out" / "empty the trash" | **Waits for your "yes"** |
-| "tell me about John D. Rockefeller" / "who is Naval Ravikant" / "how did X ..." | Searches in the background and **reads you a short answer**; no browser opens |
+| "tell me about John D. Rockefeller" / "who is Naval Ravikant" / "how did X ..." | Searches in the background, a small text model writes a 2 to 3 sentence answer from the results, and Morpheus **reads it to you**; no browser opens |
 | "open the folder where my CAC certificate is" | Finds the file and shows it selected in its folder |
 | "... on workspace 6" (after any open) | Moves the new window to that AeroSpace workspace |
 | "open the first one" (after a web search) | Opens that result in your browser |
@@ -315,12 +315,14 @@ All personal files are ignored by git; each has an `.example` version to copy.
   "whatsapp_self_chat": "your name as WhatsApp shows your own chat, e.g. @yourname",
   "my_names": ["me", "myself", "my own chat", "yourname"],
   "terminal": "Ghostty",
-  "speaking_voice": "bm_fable"
+  "speaking_voice": "bm_fable",
+  "answer_model": "@cf/openai/gpt-oss-20b"
 }
 ```
 
 - `whatsapp_self_chat` and `my_names`: "send it to **me**" goes to your own WhatsApp chat.
 - `terminal`: the app used for "open tmux in ...".
+- `answer_model`: the [Workers AI text model](https://developers.cloudflare.com/workers-ai/models/) that writes spoken answers. It only answers questions, from search results; it never decides what to do (Clef does). If it fails, `llama-3.2-3b-instruct` takes over, then the plain search snippets.
 - `speaking_voice`: any [Kokoro voice](https://huggingface.co/hexgrad/Kokoro-82M/blob/main/VOICES.md). Names starting with `b` speak British English, `a` American: `bm_fable`, `bm_george`, `am_michael`, `af_heart`...
 
 ### `vocab.txt`: words it mishears
@@ -378,11 +380,13 @@ If it crashes, macOS restarts it within 10 seconds. "Quit Morpheus" in the menu 
 
 **Sent to Cloudflare** for each step of a command: the text of the command, the names of open apps and the front app, names of matching media files, and the options to choose from. No audio, no screenshots.
 
-**Sent to Jina or DuckDuckGo:** only the text of a sentence Morpheus didn't understand, when it falls back to a web search.
+**Sent to Jina or DuckDuckGo:** the text of a question you asked, or of a sentence Morpheus didn't understand.
+
+**Sent to the Cloudflare text model:** that question and its search results, to write the spoken answer.
 
 **Remembered on your Mac** in `~/Library/Application Support/Morpheus`: commands that worked (`history.json`, for "Did you mean") and your web searches (`searches.md`). Delete the folder to forget them.
 
-**Cost:** Clef is billed per input token (about $0.24 per million; output is free). A typical command is a few thousand tokens, so a thousand commands cost well under a dollar. Check current prices on [Workers AI pricing](https://developers.cloudflare.com/workers-ai/platform/pricing/).
+**Cost:** Clef and the answer model run on Workers AI, which has a free daily allowance before it charges. Clef is billed per input token (about $0.24 per million; output is free). A typical command is a few thousand tokens, so a thousand commands cost well under a dollar. Check current prices on [Workers AI pricing](https://developers.cloudflare.com/workers-ai/platform/pricing/).
 
 **Safety:** sending a WhatsApp message or file, and running anything outside the terminal safe list, always waits for your spoken "yes". Anything else cancels.
 

@@ -674,9 +674,14 @@ def web_results(query, n=5):
         req = urllib.request.Request("https://s.jina.ai/?q=" + urllib.parse.quote(query),
                                      headers={"Authorization": f"Bearer {key}", "Accept": "application/json",
                                               "X-Respond-With": "no-content"})
-        data = json.loads(urllib.request.urlopen(req, timeout=20).read())
-        return [{"title": d.get("title", ""), "url": d.get("url", ""), "text": d.get("description", "")}
-                for d in (data.get("data") or [])[:n]]
+        try:
+            data = json.loads(urllib.request.urlopen(req, timeout=8).read())
+            found = [{"title": d.get("title", ""), "url": d.get("url", ""), "text": d.get("description", "")}
+                     for d in (data.get("data") or [])[:n]]
+            if found:
+                return found
+        except (OSError, ValueError) as e:   # Jina sometimes stalls for 20 s or more: don't wait on it
+            print(f"  Jina search failed ({e}), trying DuckDuckGo")
     import html as html_lib
     req = urllib.request.Request("https://html.duckduckgo.com/html/", data=urllib.parse.urlencode({"q": query}).encode(),
                                  headers={"User-Agent": "Mozilla/5.0 (Macintosh) AppleWebKit/605.1.15 Safari/605.1.15"})

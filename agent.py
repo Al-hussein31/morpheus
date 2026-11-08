@@ -26,6 +26,7 @@ import tempfile
 import threading
 import time
 import urllib.parse
+import urllib.request
 
 import actions
 import memory
@@ -394,6 +395,40 @@ def find_by_name(goal, words, places, folder):
 
 
 UNSURE = 0.45
+
+
+# Clef only chooses; a written answer needs a text model. It sees only the search
+# results, so it answers from them instead of from memory. Tested from Lagos:
+# gpt-oss-20b 2.1 s with the best answers, llama-3.2-3b 1.2 s as the backup.
+ANSWER_MODELS = [actions.CONFIG.get("answer_model", "@cf/openai/gpt-oss-20b"), "@cf/meta/llama-3.2-3b-instruct"]
+ANSWER_RULES = ("You are Morpheus, a voice assistant. Answer in 2 or 3 short spoken sentences, under 60 words, "
+                "using only the search results. No lists, no markdown, no links. If the results don't answer it, say so.")
+
+
+def written_answer(question, results):
+    """A short spoken answer written from the search results, or None (then the snippets are read)."""
+    sources = "\n".join(f"- {r['title']}: {r['text']}" for r in results[:6])
+    messages = [{"role": "system", "content": ANSWER_RULES},
+                {"role": "user", "content": f"Question: {question}\n\nSearch results:\n{sources}"}]
+    for model in dict.fromkeys(ANSWER_MODELS):
+        body = {"messages": messages, "max_tokens": 1000}
+        if "gpt-oss" in model:
+            # It thinks before answering; at its default effort the thinking used up all 400
+            # tokens in 15 s and wrote nothing. Low effort: about 2 s.
+            body["reasoning_effort"] = "low"
+        req = urllib.request.Request(f"https://api.cloudflare.com/client/v4/accounts/{ACCOUNT}/ai/run/{model}", data=json.dumps(body).encode(),
+                                     headers={"Authorization": f"Bearer {TOKEN}", "Content-Type": "application/json"})
+        t = time.time()
+        try:
+            result = json.loads(urllib.request.urlopen(req, timeout=12).read())["result"]
+        except (OSError, ValueError, KeyError) as e:
+            print(f"    {model} failed: {e}")
+            continue
+        text = result.get("response") or ((result.get("choices") or [{}])[0].get("message") or {}).get("content")
+        if isinstance(text, str) and text.strip():
+            print(f"    answer from {model} [{(time.time() - t) * 1000:.0f} ms]")
+            return re.sub(r"[*_#`]+", "", " ".join(text.replace("\u202f", " ").replace("\u2011", "-").split()))
+    return None
 
 
 def spoken_answer(results, max_words=45):   # about 15 seconds: the mic is closed while it speaks
@@ -818,7 +853,7 @@ def run(goal, ctx=None):
                 break
             last["results"] = results
             memory.log_search(question, results)
-            out["say"] = spoken_answer(results)
+            out["say"] = written_answer(question, results) or spoken_answer(results)
             report.append(f"{results[0]['title'][:60]} (say \"open the first one\" for the page)")
         elif tool == "open_search_result":
             results = last.get("results") or []

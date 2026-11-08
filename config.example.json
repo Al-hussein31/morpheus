@@ -8,5 +8,6 @@
     "my own chat"
   ],
   "terminal": "Ghostty",
-  "speaking_voice": "bm_fable"
+  "speaking_voice": "bm_fable",
+  "answer_model": "@cf/openai/gpt-oss-20b"
 }
